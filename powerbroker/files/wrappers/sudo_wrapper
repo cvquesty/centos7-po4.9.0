@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-
-PBRUN=`which pbrun`
-PBSUDO=`which pb_sudo`
-
-${PBRUN} ${PBSUDO} $1
