@@ -1,0 +1,59 @@
+############################################################################
+#
+#  NOTICE: This file is maintained by puppet, any changes will be
+#          overwritten each time the puppet agent runs.
+#
+############################################################################
+kerberos                           no
+allownonreservedconnections        yes
+minoutgoingport                    1025
+maxoutgoingport                    65535
+pblocaldlog                        /x/pb/logs/pblocald.log
+pblogdlog                          /x/pb/logs/pblogd.log
+pbmasterdlog                       /x/pb/logs/pbmasterd.log
+pbguidlog                          /x/pb/logs/pbguid.log
+eventlog                           /x/pb/logs/pb.eventlog
+eventlogrotate                     size=50m,path=/x/pb/nfs/eventlogs/<%= @eventlogrotate %>
+syslog                             yes
+facility                           LOG_AUTHPRIV
+policyfile                         /etc/pb.conf
+passwordlogging                    never
+policydir                          /etc
+masterport                         24345
+localport                          24346
+logport                            24347
+submitmasters                      <%= @submitmasters %>
+acceptmasters                      <%= @acceptmasters %>
+logservers                         <%= @logservers %>
+shortnamesok                       yes
+randomizesubmitmasters             no
+rejectnullpasswords                no
+allowlocalmode                     yes
+pbsyncdlog                         /x/pb/logs/pbsyncd.log
+pbsynclog                          /x/pb/logs/pbsync.log
+kshlog                             /x/pb/logs/pbksh.log
+shlog                              /x/pb/logs/pbsh.log
+recordunixptysessions              yes
+syslogsessions                     yes
+rootshelldefaultiolog              /x/pb/logs/pbshell.iolog
+sharedlibkrb5dependencies          /usr/lib/beyondtrust/pb/libcom_err.so.3 /usr/lib/beyondtrust/pb/libk5crypto.so.3 /usr/lib/beyondtrust/pb/libkrb5.so.3 /usr/lib/beyondtrust/pb/libgssapi_krb5.so.2
+sharedlibssldependencies           /usr/lib/beyondtrust/pb/libcrypto.so.0.9.8 /usr/lib/beyondtrust/pb/libssl.so.0.9.8
+sharedlibldapdependencies          /usr/lib/beyondtrust/pb/liblber-2.3.so.0 /usr/lib/beyondtrust/pb/libldap-2.3.so.0
+sharedlibcurldependencies          /usr/lib/beyondtrust/pb/libcurl.so.4.3.0
+networkencryption                  aes-256:keyfile=/etc/pb.key
+eventlogencryption                 none
+iologencryption                    none
+policyencryption                   none
+pbadminpath                        /usr/sbin
+pbreplaylog                        /x/pb/logs/pbreplay.log
+pbexpress                          no
+syslog_accept_format "pb_action=ACCEPTED pb_dc=<%= @pb_location %> pb_session_id=%uniqueid% pb_exec_uid=%user% pb_submithost=%submithost% pb_runuser=%runuser% pb_runhost=%runhost% pb_masterhost=%masterhost% pb_loghost=%loghostip% pb_utime=%unixtimestamp% pb_command=\"%argv%\""
+syslog_reject_format "pb_action=REJECTED pb_dc=<%= @pb_location %> pb_session_id=%uniqueid% pb_exec_uid=%user% pb_submithost=%submithost% pb_runuser=%runuser% pb_runhost=%runhost% pb_masterhost=%masterhost% pb_loghost=%loghostip% pb_utime=%unixtimestamp% pb_command=\"%argv%\""
+syslogsession_start_format "pb_action=SESSION_START pb_dc=<%= @pb_location %> pb_session_id=%uniqueid% pb_exec_uid=%user% pb_submithost=%submithost% pb_runuser=%runuser% pb_runhost=%runhost% pb_masterhost=%masterhost% pb_loghost=%loghostip% pb_utime=%unixtimestamp% pb_command=\"%argv%\""
+syslogsession_start_fail_format "pb_action=SESSION_FAILED pb_dc=<%= @pb_location %> pb_session_id=%uniqueid% pb_exec_uid=%user% pb_submithost=%submithost% pb_runuser=%runuser% pb_runhost=%runhost% pb_masterhost=%masterhost% pb_loghost=%loghostip% pb_utime=%unixtimestamp% pb_command=\"%argv%\""
+syslogsession_finished_format "pb_action=SESSION_FINISH pb_dc=<%= @pb_location %> pb_session_id=%uniqueid% pb_exec_uid=%user% pb_submithost=%submithost% pb_runuser=%runuser% pb_runhost=%runhost% pb_masterhost=%masterhost% pb_loghost=%loghostip% pb_utime=%unixtimestamp% pb_command=\"%argv%\""
+tcpkeepalive                       yes
+nameresolutiontimeout              30
+addressfamily                      ipv4
+licensedata                        datenodename
+licensedatafile                    /x/pb/logs/pblicense.dat

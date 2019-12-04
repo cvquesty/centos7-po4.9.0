@@ -1,0 +1,2536 @@
+#!/bin/sh
+# BeyondTrust PowerBroker network configuration script
+    #PB_ShowCallTrace=yes
+    #PB_ShowDeclares=yes
+    #SY_ShowCallTrace=yes
+    #SY_ShowDeclares=yes
+
+token="/etc/.sypbcfg_svcsinetdsmf"
+if [ ! -f "$token" ] ; then
+    exit 0
+else
+    i_am=`basename $0`
+    configfile="/etc/pb.cfg"
+    savedconfigfile="/etc/.pb.cfg"
+    if [ ! -f "$configfile" -a ! -f "$savedconfigfile" ] ; then
+	echo "${i_am}: $configfile not found, unable to reconfigure network."
+	exit 1
+    fi
+    sypbaction=`cat "$token"`
+    if [ "X$sypbaction" != "Xinstall" -a "X$sypbaction" != "Xremove" ] ; then
+	echo "${i_am}: 'sypbaction' set to invalid value, unable to reconfigure network."
+	echo "Usage: $i_am { start | stop }  # with $token containing { install | remove }"
+	exit 1
+    fi
+fi
+#
+getArchitecture()
+{
+    UNAME_MACHINE=`(uname -m) 2>/dev/null` || UNAME_MACHINE=unknown
+    UNAME_SYSTEM=` (uname -s) 2>/dev/null` || UNAME_SYSTEM=unknown
+    UNAME_RELEASE=`(uname -r) 2>/dev/null` || UNAME_RELEASE=unknown
+    UNAME_VERSION=`(uname -v) 2>/dev/null` || UNAME_VERSION=unknown
+
+    newarch="${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}"
+    case "$newarch" in
+        sun4*:SunOS:5.11:*)             Installplatform_sol11Arch ;;
+        sun4*:SunOS:5.10:*)             arch=sparc_solarisC ;;
+        sun4*:SunOS:5.9:*)              arch=sparc_solarisC ;;
+        sun4*:SunOS:5.8:*)              arch=sparc_solarisC ;;
+        i86pc:SunOS:5.11:*)             Installplatform_sol11Arch ;;
+        i86pc:SunOS:5.10:*)             arch=x86_solarisB ;;    
+        i86pc:SunOS:5.9:*)              arch=x86_solarisB ;;    
+        i86pc:SunOS:5.8:*)              arch=x86_solarisB ;;    
+        *)                              arch=unknown ;;
+    esac
+
+}
+#
+Installplatform_sol11Arch()
+{
+    myunamev=`uname -v` >/dev/null 2>&1
+    case $myunamev in
+        snv_*) # Express
+            case $choice in
+                sun4*:*:*:*)    arch=sparc_solarisC ;;
+                i86pc:*:*:*)    arch=x86_solarisB ;;
+            esac
+            ;;
+        11.*) # not Express
+            case $choice in
+                sun4*:*:*:*)    arch=sparc_solarisD ;;
+                i86pc:*:*:*)    arch=x86_solarisD ;;
+            esac
+            ;;
+    esac
+}
+#
+initializeVariables1()
+{
+    # pbinstall...
+    packagetype="pb"
+
+    SY_ProductTitle="PowerBroker"
+    SY_ProductRegexp="[Pp]ower[Bb]roker"
+    SY_ProductAbbrev="${packagetype}"
+
+    # SY_InstallSupportInitialize()...
+    inetd_capable=yes
+    xinetd_capable=yes
+    sol10svcs_capable=no
+    launchd_capable=no
+    inittab_capable=no              # don't read anything into this...
+    rc_d_capable=no
+
+    inetd_files="undefined"
+    xinetd_files="undefined"
+    inittab_files="undefined"
+    rc_d_files="undefined"
+    sol10cfg="no"
+    launchdcfg="no"
+    rc_d_cfg="no"
+    inittab_cfg="no"
+
+    sy_install_services_backup="unknown"
+    sy_install_inittab_backup="unknown"
+    sy_install_initbase_backup="unknown"
+    sy_install_sd_cfgfiles_cleaned=""
+
+    # SY_InstallChooseInputArch()...
+    # Solaris-specific, sparc/x86-common
+    ps_cmd='-e'
+    psf_cmd='ps -ef'
+    sys_os_ver="`uname -r`"
+    case "X${sys_os_ver}" in
+        X5.[89])
+            ;;
+        X*)
+            inetd_capable=no
+            xinetd_capable=no
+            sol10svcs_capable=yes
+            sol10cfg=yes
+            smf_manifiest_directory_legacy=/var/svc/manifest/symark
+            smf_manifiest_directory=/var/svc/manifest/beyondtrust
+            ;;
+    esac
+    sy_sol_manifest_import="no"
+    case "X${sys_os_ver}" in
+        X5.11)
+            sy_sol_manifest_import="yes"
+            ;;
+        X*)
+            ;;
+    esac
+
+    # misc...
+    PBMASTERD=pbmasterd
+    PBLOCALD=pblocald
+    PBLOGD=pblogd
+    PBGUID=pbguid
+    PBSGUID=pbsguid
+    PBSYNCD=pbsyncd
+    sy_prefsuff=" " # yes I mean one space!!!
+
+    # IPv6
+    sy_pingIPv6cmd="ping -sA inet6 ::1 1024 3"
+    sy_ifconfigcmd="ifconfig -a"
+    IPv6capable="no"
+    $sy_pingIPv6cmd >/dev/null 2>&1
+    if [ $? -ne 0 ] ; then
+        eval $sy_ifconfigcmd | grep "inet6" >/dev/null 2>&1
+        if [ $? -ne 0 ] ; then
+            : # IPv6capable="no"
+        else
+            IPv6capable="yes"
+        fi
+    else
+        IPv6capable="yes"
+    fi
+
+}
+#
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then 
+        echo "Declaring SY_InstallCheckAndAddPathElement()"
+fi
+#SY_InstallCheckAndAddPathElement()
+#
+# Ensure path element exists as a directory and is on the path...
+# If it isn't in PATH then add it to the 'front' end...
+#
+# if it doesn't exist as a directory then don't add it!!!
+#
+SY_InstallCheckAndAddPathElement()
+{
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then 
+                echo "In SY_InstallCheckAndAddPathElement( $* )"
+        fi   
+        if [ $# -le 1 ] ; then 
+                echo "SY_InstallCheckAndAddPathElement():  no proposed path elements specified."
+                exit 1
+        fi   
+        while [ $# -gt 0 ] ; do 
+                arg="$1"
+                shift
+                if [ ! -d "$arg" ] ; then 
+                        continue
+                fi   
+                echo ":${PATH}:" | $grep ":${arg}:" > /dev/null 2>&1 
+                sy_chkstat=$?
+                if [ $sy_chkstat -ne 0 ] ; then 
+                        PATH="${arg}:$PATH"
+                        export PATH 
+                fi   
+        done 
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then 
+                echo "Leaving SY_InstallCheckAndAddPathElement( $* )"
+        fi   
+}
+#
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCheckAndAppendPathElement()"
+fi
+#
+# Ensure path element exists as a directory and is on the path...
+# If it isn't in PATH then add it to the 'back' end...
+#
+# if it doesn't exist as a directory then don't add it!!!
+#
+SY_InstallCheckAndAppendPathElement()
+{
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallCheckAndAppendPathElement( $* )"
+        fi
+        if [ $# -le 1 ] ; then
+                echo "SY_InstallCheckAndAppendPathElement():  no proposed path elements specified."
+                exit 1
+        fi
+        while [ $# -gt 0 ] ; do
+                arg="$1"
+                shift
+                if [ ! -d "$arg" ] ; then
+                        continue
+                fi
+                echo ":${PATH}:" | $grep ":${arg}:" > /dev/null 2>&1
+                sy_chkstat=$?
+                if [ $sy_chkstat -ne 0 ] ; then
+                        PATH="${PATH}:${arg}"
+                        export PATH
+                fi
+        done
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "Leaving SY_InstallCheckAndAppendPathElement( $* )"
+        fi
+}
+initializeVariablespre2()
+{
+    # Moved, no, copied from initializeVariables2()
+#   if [ "X$TMPDIR" = "X" ] ; then
+#           TMPDIR=/tmp ; export TMPDIR
+#   fi
+    if [ "X$TMPDIR" = "X" ] ; then
+        TMPDIR="/tmp/beyondtrust_pbinstall"
+    else
+        TMPDIRNM=`basename $TMPDIR`
+        if [ "$TMPDIRNM" != "beyondtrust_pbinstall" ] ; then
+            TMPDIR="${TMPDIR}/beyondtrust_pbinstall"
+        fi
+    fi
+    export TMPDIR
+    TMPDIRROOT=`dirname $TMPDIR`
+    if [ ! -d "$TMPDIRROOT" ] ; then
+        echo "SY_InstallSetTmpDir(): this system's '\$TMPDIR' or '/tmp' not found."
+        exit 1
+    fi
+    if [ -d "$TMPDIR" ] ; then
+        dirowner=`ls -ld $TMPDIR | awk '{print $3}'`
+        dirperms=`ls -ld $TMPDIR | awk '{print $1}' | cut -c5-10 | sed 's/-/0/g'`
+        if [ "X$dirowner" != "Xroot" -o "X$dirperms" != "X000000" ] ; then
+            echo "SY_InstallSetTmpDir(): $TMPDIR ownership (root) or protections (700) incorrect, correct and retry."
+            exit 1
+        fi
+    else
+        mkdir "$TMPDIR"
+        if [ $? -ne 0 ] ; then
+            echo "SY_InstallSetTmpDir(): could not create '$TMPDIR'."
+            exit 1
+        fi
+        chown root "$TMPDIR"
+        chmod g-s "$TMPDIR" #AIX and others
+        chmod 700 "$TMPDIR"
+    fi
+
+    # Save locale information
+    if [ "X$sav_LC_ALL" = "X" ] ; then
+        > ${TMPDIR}/pbwrite.$$ > /dev/null 2>&1
+        if [ $? -ne 0 ] ; then
+            echo "Error, could not write to TMPDIR '${TMPDIR}', exiting. "
+            exit 1
+        else
+            rm -f ${TMPDIR}/pbwrite.$$
+        fi
+        locale > /dev/null 2>&1
+        if [ $? -ne 0 ] ; then
+            echo "Warning, 'locale' command not found, unable to provide language support. "
+            sav_LC_ALL="C"
+        else
+            locale > ${TMPDIR}/pblocale.$$
+            chown 600 ${TMPDIR}/pblocale.$$
+            cat ${TMPDIR}/pblocale.$$ | sed 's/^/sav_/'  > ${TMPDIR}/pblocale2.$$
+            chmod 700 ${TMPDIR}/pblocale2.$$
+            . ${TMPDIR}/pblocale2.$$
+            rm -f ${TMPDIR}/pblocale*.$$
+            if [ "X$sav_LC_ALL" = "X" ] ; then
+                sav_LC_ALL="$sav_LANG"
+            fi
+            if [ "X$sav_LC_ALL" = "X" ] ; then
+                sav_LC_ALL="$sav_LC_CTYPE"
+            fi
+            if [ "X$sav_LC_ALL" = "X" ] ; then
+                sav_LC_ALL="C"
+            fi
+            localeutf8=0
+            localeUTFd8=0
+            echo "$sav_LC_ALL" | grep "utf8" > /dev/null 2>&1
+            if [ $? -eq 0 ] ; then localeutf8=1 ; fi
+            echo "$sav_LC_ALL" | grep 'UTF-8' > /dev/null 2>&1
+            if [ $? -eq 0 ] ; then localeUTFd8=1 ; fi
+            if [ $localeutf8 -eq 0 -a $localeUTFd8 -eq 0 ] ; then
+                sav_LC_ALL="C"
+            fi
+        fi
+    fi
+
+}
+initializeVariables2()
+{
+    # SY_InstallSupportInitialize()
+    #sy_MyFullName="$1"
+    sy_MyFullName="`basename $0`"
+
+    LANG=C; LANGUAGE=C; LC_MONETARY=C ; LC_NUMERIC=C
+    LC_MESSAGES=C ; LC_COLLATE=C ;  LC_CTYPE=C ; LC_TIME=C ; LC_ALL=C
+    export LANG LANGUAGE LC_MONETARY LC_NUMERIC LC_MESSAGES LC_COLLATE LC_CTYPE LC_TIME LC_ALL
+
+    SY_InstallCheckAndAddPathElement /bin /usr/bin /usr/sbin
+    SY_InstallCheckAndAppendPathElement /usr/ucb /usr/bsd
+
+    if [ "X$SHELL" = "X" ] ; then
+	SHELL=/bin/sh ; export SHELL
+    fi
+#   if [ "X$TMPDIR" = "X" ] ; then
+#	TMPDIR=/tmp ; export TMPDIR
+#   fi
+    #checkinstall, run as install/nobody; only check:
+    if [ "X$TMPDIR" = "X" ] ; then
+        TMPDIR="/tmp/beyondtrust_pbinstall"
+    else
+        TMPDIRNM=`basename $TMPDIR`
+        if [ "$TMPDIRNM" != "beyondtrust_pbinstall" ] ; then
+            TMPDIR="${TMPDIR}/beyondtrust_pbinstall"
+        fi
+    fi
+    #export TMPDIR
+    TMPDIRROOT=`dirname $TMPDIR`
+    if [ ! -d "$TMPDIRROOT" ] ; then
+        echo "SY_InstallSetTmpDir(): this system's '\$TMPDIR' or '/tmp' not found."
+        exit 1
+    fi
+    if [ -d "$TMPDIR" ] ; then
+        dirowner=`ls -ld $TMPDIR | awk '{print $3}'`
+        dirperms=`ls -ld $TMPDIR | awk '{print $1}' | cut -c5-10 | sed 's/-/0/g'`
+        if [ "X$dirowner" != "Xroot" -o "X$dirperms" != "X000000" ] ; then
+            echo "SY_InstallSetTmpDir(): $TMPDIR ownership (root) or protections (700) incorrect, correct and retry."
+            exit 1
+        fi
+    #else
+    #    mkdir "$TMPDIR"
+    #    if [ $? -ne 0 ] ; then
+    #        echo "SY_InstallSetTmpDir(): could not create '$TMPDIR'."
+    #        exit 1
+    #    fi
+    #    chown root "$TMPDIR"
+    #    chmod g-s "$TMPDIR" #AIX and others
+    #    chmod 700 "$TMPDIR"
+    fi
+
+    # SY_InstallChooseInputArch()...
+    # remember, echo, pwd, and some other commands may be shell builtins..
+    awk=awk
+    basename=basename
+    cat=cat
+    cd=cd
+    chmod=chmod
+    chown=chown
+    cksum=cksum
+    clear=clear
+    cp=cp
+    diff=diff
+    dirname=dirname
+    df=df
+    echo=echo
+    id=id
+    grep=grep
+    ls=ls
+    mkdir=mkdir
+    mv=mv
+    od=od
+    oddashc="-c"
+    ps=ps
+    pwd=pwd
+    rm=rm
+    rmdir=rmdir
+    sed=sed
+    sort=sort
+    stty=stty
+    tar=tar
+    tr=tr
+    touch=touch
+    uname=uname
+    wc=wc
+    xargs=xargs
+    sy_inittab_runlevel=3
+
+    # Solaris-specific, sparc/x86-common
+    # JumpStart (Sol 9) does not have xpg4
+    if [ "X${PKG_INSTALL_ROOT}" = "X" ] ; then
+	awk=/usr/xpg4/bin/awk
+	grep=/usr/xpg4/bin/grep
+	sed=/usr/bin/sed
+    fi
+
+}
+
+#
+readPBConfig2()
+{
+
+if [ -f "$configfile" ] ; then
+    . $configfile
+else
+    . $savedconfigfile
+fi
+
+}
+#
+addShellsSetup()
+{
+# from sy_
+shells_file=""
+for tmpfile in /etc/shells ; do
+      if [ -f "$tmpfile" -a "X$shells_file" = "X" ] ; then
+              shells_file="$tmpfile"
+      fi
+done
+}
+#
+addShellsSetup2()
+{
+# from pbi
+    if [ "X${inst_client}" = "Xyes" -a "X${inst_doshellsfile}" = "Xyes" -a "X${shells_file}" != "X" ] ; then
+        shells_list=""
+        if [ "X${inst_pbsh}" = "Xyes" ] ; then
+            shells_list="${inst_userdir}/${prefix}pbsh${suffix}"
+        fi
+        if [ "X${inst_pbsh}" = "Xyes" ] ; then
+            shells_list="${shells_list} ${inst_userdir}/${prefix}pbksh${suffix}"
+        fi
+        if [ "X${shells_list}" != "X" ] ; then
+            # echo "PB_InstallAddShellToShellsFile ${shells_file} ${shells_list}" >> ${script}
+	    SY_InstallAddShellToShellsFile ${shells_file} ${shells_list} #pkg#
+        fi
+        unset shells_list
+    fi
+
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallAddShellToShellsFile()"
+fi
+
+SY_InstallAddShellToShellsFile()
+{
+        if [ $# -lt 2 ] ; then
+                echo " "
+                echo "SY_InstallAddShellToShellsFile(): # of arguments ($#) < minimum (2)"
+                echo " "
+                exit 2
+        fi
+
+
+        sy_shells_file=$1
+        shift
+
+        if [ ! -f $sy_shells_file -a ! -h $sy_shells_file ] ; then
+                echo " "
+                echo "SY_InstallAddShellToShellsFile(): shells file '$sy_shells_file' is not a file or symlink."
+                echo " "
+                return 2
+        fi
+
+        if [  -x $sy_shells_file ] ; then
+                echo " "
+                echo "SY_InstallAddShellToShellsFile(): shells file '$sy_shells_file' is executable."
+                echo " "
+                return 2
+        fi
+
+
+        awkstat=0
+        diffstat=0
+        my_shells="$@"
+
+        # awk through the backup into TMPDIR adding shells as needed
+
+        tmp_shells_file="${TMPDIR}/`basename ${sy_shells_file}`"
+
+        $rm -f ${tmp_shells_file}
+
+        awkcmd="BEGIN { shells_string=\"${my_shells}\"; z=split(shells_string, shells, \" \" )  }
+                { flag = 0 ; for ( i = 1; i <= z; i++ ) { if ( "'$'"1 == shells[i] ) { next } } ; print "'$'"0 }
+                END { for ( i = 1; i <= z; i++ ) { print shells[i] } } "
+
+
+        $awk "${awkcmd}" ${sy_shells_file} > $tmp_shells_file
+        awkstat=$?
+
+        if [ $awkstat -ne 0 ] ; then
+                echo ""
+                echo " Unable to add '${my_shells}' to ${sy_shells_file}"
+                echo ""
+                return $awkstat
+        fi
+
+        $diff ${tmp_shells_file} ${sy_shells_file} > /dev/null 2>&1
+        diffstat=$?
+        if [ $diffstat -eq 1 ] ; then
+                # backup shells_file
+                SY_InstallBackupFile ${sy_shells_file} sybak backup_filename
+                stat=$?
+                if [ $stat -ne 0 ] ; then
+                        echo " "
+                        echo "Unable to backup $sy_shells_file... exiting..."
+                        echo " "
+                        exit $stat
+                fi
+
+                $cp ${tmp_shells_file} ${sy_shells_file}
+
+        else
+                rm=${rm:-/bin/rm}
+                ${rm} -f ${tmp_shells_file}
+        fi
+
+        unset awkstat
+        unset diffstat
+        unset sy_shells_file
+        unset awkcmd
+
+        return 0
+}
+#
+RemoveShellFromShellsFile()
+{
+# from pb_
+    PBKSH=pbksh
+    PBSH=pbsh
+# from pbu
+#prefixed/suffixed shells
+rmv_from_etc_shells=""
+for i in ${PBKSH} ${PBSH} ; do
+  if [ -f $inst_userdir/$i ]; then
+    #pkg#echo "Removing $inst_userdir/$i..."
+    #pkg#$chmod 600 $inst_userdir/$i
+    #pkg#$rm -f $inst_userdir/$i
+    #manremove_fullname ${i}
+    if [ "X$shells_file"  != "X" ] ; then
+        $grep "${inst_userdir}/${i}\$" $shells_file 2>&1 > /dev/null
+        stat=$?
+        if [ $stat -eq 0 ] ; then
+                rmv_from_etc_shells="$rmv_from_etc_shells ${inst_userdir}/${i}"
+        fi
+    fi
+  fi
+done
+if [ "X$rmv_from_etc_shells" != "X" ] ; then
+        # backup /etc/shells
+        SY_InstallBackupFile ${shells_file} sybak backup_filename
+        stat=$?
+        if [ $stat -ne 0 ] ; then
+                echo " "
+                echo "Unable to backup $shells_file... exiting..."
+                echo " "
+                exit $stat
+        fi
+        # remove indicate hells...
+        # split rmv_from_etc_shells
+        # if $1 is in the split shells list don't print it!!!
+        $awk ' BEGIN { string="'"${rmv_from_etc_shells}"'" ; z=split(string,shells_to_remove) }
+                     { for ( i = 1; i <= z; i++ ) { if ( shells_to_remove[i] == $1 ) { next } }; print $0} ' ${backup_filename} > ${shells_file}
+fi
+
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallLocateSuperDaemonCfgFiles()"
+fi
+#
+#
+# Go forth and find out if the default or explicitly specified superdaemon
+# configuration files (for both inetd and xinetd) exist
+# Add: do inetd if inetd_capable != no
+#
+SY_InstallLocateSuperDaemonCfgFiles()
+{
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallLocateSuperDaemonCfgFiles()"
+        fi
+
+        locate_sd_file_flag=0
+
+        sol10svcs_filesnames=""
+        launchd_filesnames=""
+
+        echo "Looking for SuperDaemons to configure..."
+
+        configFileTypes=""
+        configFileNames=""
+        configureDaemon=""
+
+        if [ "X$sol10svcs_capable" != "Xno" ] ; then
+                configFileTypes="sol10svcs"
+                configFileNames="not_applicable"
+                if [ "X$SY_InstallCanOverride" = "X" ] ; then #
+                        #
+                        # yes, this is an undocumented environment variable
+                        # yes, you may set it.
+                        # Setting it is unsupported and will show any installation
+                        # options not relevent to your platform.  Using these
+                        # options that would not normally be displayed may make
+                        # either your PowerBroker installation or your entire
+                        # system installation unusable.
+                        #
+                        # In short, this environment variable is for Symark Internal Use _*ONLY*_
+                        #
+                        configureDaemon="yes"
+                        return 0
+                fi
+        fi
+
+        if [ "X$launchd_capable" != "Xno" ] ; then
+                configFileTypes="launchd"
+                configFileNames="not_applicable"
+                if [ "X$SY_InstallCanOverride" = "X" ] ; then #
+                        #
+                        # yes, this is an undocumented environment variable
+                        # yes, you may set it.
+                        # Setting it is unsupported and will show any installation
+                        # options not relevent to your platform.  Using these
+                        # options that would not normally be displayed may make
+                        # either your PowerBroker installation or your entire
+                        # system installation unusable.
+                        #
+                        # In short, this environment variable is for Symark Internal Use _*ONLY*_
+                        #
+                        configureDaemon="yes"
+                        return 0
+                fi
+        fi
+
+        #
+        # Yes if one has:
+        # 
+        #       /etc/inetd -> /etc/inet
+        #       /etc/inetd.conf -> /etc/inet/inetd.conf
+        #
+        #       One will see two seperate inetd.conf entries on some systems even though
+        #       they are the same file.  In the real world no one is insane enough
+        #       to do something that crazy (are you?).
+        #       
+        #
+
+       if [ "X$inetd_capable" != "Xno" ] ; then
+        for sd_item in /usr/etc/inetd.conf /etc/inetd.conf /etc/inetd/inetd.conf ; do
+                if [ -f $sd_item -a ! -h $sd_item ] ; then
+                        SY_InstallAddFileToSDList inetd_files $sd_item
+                        continue
+                fi
+                if [ -h $sd_item ] ; then
+                        sd_tgtfile=`dirname $sd_item`
+                        sd_tgtfile=`( ls -l "$sd_item" ) | $grep -e '->' | $awk '{print $NF};'`
+                        echo $sd_tgtfile | $grep "^/" 2>&1 >/dev/null
+                        status=$?
+                        if [ "$status" = '0' ]; then
+                                SY_InstallAddFileToSDList  inetd_files "$sd_tgtfile"
+                                continue
+                        else
+                                sd_pathname="`dirname $sd_item`"
+                                SY_InstallAddFileToSDList inetd_files  "$sd_pathname/$sd_tgtfile"
+                                continue
+                        fi
+                fi
+        done
+        # any active inetd daemons with 'special' config files???
+        (COLUMNS=200 $psf_cmd ; COLUMNS=200 $psf_cmd ; COLUMNS=200 $psf_cmd) | sort -u | $grep inetd | $grep -v xinetd | $grep -v grep | $grep -v -e '-f' 2>&1 > /dev/null
+        status=$?
+        if [ $status -eq 0 ]; then
+                inetd_newfiles=`echo " "; (COLUMNS=200 $psf_cmd ; COLUMNS=200 $psf_cmd; COLUMNS=200 $psf_cmd ) | sort -u | $grep inetd | $grep -v xinetd  | $grep -v grep | $grep -v -e '-f' | $awk '{ print $NF }' | $xargs -n${sy_xargs_space}100 echo `
+                for file in undefined $inetd_newfiles; do
+                        if [ -f $file ]; then
+                                SY_InstallAddFileToSDList inetd_files $file
+                        else
+                                SY_InstallAddFileToSDList inetd_files undefined
+                        fi
+                done
+        fi
+       fi # end if [ "X$inetd_capable" != "Xno" ]
+
+        if [ -f /etc/xinetd.conf ]; then
+            SY_InstallAddFileToSDList xinetd_files /etc/xinetd.conf
+        fi
+        # any active xinetd daemons with 'special' config files???
+        (COLUMNS=200 $psf_cmd ; COLUMNS=200 $psf_cmd; COLUMNS=200 $psf_cmd) | sort -u | $grep xinetd | $grep -v grep  2>&1 > /dev/null
+        status=$?
+        if [ $status -eq 0 ]; then
+                xinetd_newfiles=`echo " "; (COLUMNS=200 $psf_cmd ; COLUMNS=200 $psf_cmd; COLUMNS=200 $psf_cmd) | sort -u | $grep xinetd  | $grep -v grep | $awk '{  for ( i = 2 ; i <= NF ; i++ ) { if ( $i == "-f" ) { i = i + 1 ; print $i; next } ; print "undefined" }  }'`
+                for file in undefined $xinetd_newfiles; do
+                        if [ -f $file ]; then
+                                SY_InstallAddFileToSDList xinetd_files $file
+                        else
+                                SY_InstallAddFileToSDList xinetd_files undefined
+                        fi
+                done
+        fi
+
+        if [ "$inetd_files" = 'undefined' ]; then
+            if [ "$xinetd_files" = 'undefined' ]; then
+                if [ "X$sol10svcs_capable" != "Xno" -a "X$SY_InstallCanOverride" = "X" ] ; then #
+                            echo "Can not find a superdaemon (inetd, xinetd, or SMF) configuration file!" 1>&2
+                            exit 1
+                fi
+                if [ "X$launchd_capable" != "Xno" -a "X$SY_InstallCanOverride" = "X" ] ; then #
+                            echo "Can not find a superdaemon (inetd, xinetd, or launchd) configuration file!" 1>&2
+                            exit 1
+                fi
+           fi
+        fi
+
+        x="$configFileTypes"
+        configFileTypes=`echo "$inetd_files" | $awk '{printf "%s", $1; for (i=2; i<=NF; i++) {printf " %s", "inetd"}; print " " }'`
+        configFileTypes="$x $configFileTypes"
+        x=`echo "$xinetd_files" | $awk '{printf "%s", $1; for (i=2; i<=NF; i++) {printf " %s", "xinetd"}; print " " }'`
+        configFileTypes="$configFileTypes $x"
+
+        configFileNames="$configFileNames $inetd_files $xinetd_files"
+        for item in $configFileTypes; do
+            case $item in
+              undefined)
+                configureDaemon="$configureDaemon no"
+                ;;
+              *)
+                configureDaemon="$configureDaemon yes"
+                ;;
+             esac
+        done
+
+        echo "Finished looking for SuperDaemons to configure..."
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "Leaving SY_InstallLocateSuperDaemonCfgFiles( '$inetd_files' , '$xinetd_files')"
+        fi
+        return 0
+}
+#
+#
+#       Add a filename to the specified list resolving symbolic links without duplicates
+#
+#       Arguments
+#
+#               $1      list name to add to (inetd_files, xinetd_files, etc)
+#               $2      filename to add to the selected list
+#
+#       NOTE:  if $2 is a symlink then the link is 'resolved' and this function is recursively called
+#
+#       
+SY_InstallAddFileToSDList()
+{
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallAddFileToSDList ( $1 . $2 )"
+    fi
+
+    if [ "X$2" = "Xundefined" ] ; then
+        return 0        # just go
+    fi
+
+    if [ -h "$2" ]; then
+        # if a link make sure the target file is not already in the list...
+        pathname=`dirname "$2"`
+        (cd $pathname ; ls -l "$2" ) | $grep -e '->' 2>&1 > /dev/null
+        status=$?
+        if [ "$status" = "0" ] ; then
+                # yes, it is really a link, go process the target...
+                tgtfile=`(cd $pathname ; ls -l "$2" ) | $grep -e '->' | $awk '{print $NF};'`
+                echo $tgtfile | $grep "^/" 2>&1 >/dev/null
+                status=$?
+                if [ "$status" = '0' ]; then
+                        SY_InstallAddFileToSDList "$1" "$tgtfile"
+                else
+                        SY_InstallAddFileToSDList "$1" "$pathname/$tgtfile"
+                fi
+
+
+                if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                    echo "Leaving SY_InstallAddFileToSDList ( $1 . $2 ) -- a link, not already in list..."
+                fi
+
+                return
+        fi
+    else
+        if [ -x "$2" ] ; then
+                # we will not configure files which are executable...
+                # this keeps us from trying to edit /usr/sbin/inetd ... :-)
+                tmpbasename="`basename $2`"
+                if [ "X$tmpbasename" != "Xinetd" -a "X$tmpbasename" != "Xxinetd" ] ; then       # silently ignore executables
+                        echo "SY_InstallAddFileToSDList ( $1 . $2 ) -- configuration file is executable???"
+                        ${ls} -ld $2
+                fi
+                if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                    echo "Leaving SY_InstallAddFileToSDList ( $1 . $2 ) -- configuration file is executable???"
+                fi
+                return
+        fi
+        tgtfile="` SY_InstallPrettyUpPath $2 `"
+        set | $grep "^$1=" | $grep "${tgtfile}"  2>&1 > /dev/null
+        status=$?
+        if [ $status -ne 0 ]; then
+                case $1 in
+                    inetd_files)
+                        inetd_files="$inetd_files ${tgtfile}"
+                        ;;
+                    xinetd_files)
+                        xinetd_files="$xinetd_files ${tgtfile}"
+                        ;;
+                    *)
+                        echo "$sy_MyFullName: SY_InstallAddFileToSDList():  Invalid superdaemon config file list name '$1'"
+                        exit 1
+                        ;;
+                esac
+        fi
+    fi
+
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallAddFileToSDList ( $1 . $2 )"
+    fi
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallPrettyUpPath()"
+fi
+
+SY_InstallPrettyUpPath()
+{
+        #
+        #       Take a filespec and 'pretty it up'
+        #
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallPrettyUpPath( $* )" >&2
+        fi
+
+        dq='"'
+        case "X$1" in
+            X/*)
+                doubleslash=""
+                if [ "X$arch" = "Xx86_qnxA" ] ; then    # Oh the things we do for QNX... 
+                        case "x$1" in
+                          x//*)
+                                doubleslash="//"
+                                ;;
+                        esac
+                fi
+                #newpath="`echo \"$1\" | $awk 'BEGIN { FS='$dq'\'$dq' } NR == 1 { newsub=1; new[1]='$dq' '$dq'; for (i=1; i<=NF; i++) { x=$i ; if ( x == '$dq'.'$dq' ) { continue } ; if ( x == '$dq''$dq' ) { continue } ; if ( x == '$dq'..'$dq' ) {newsub--; continue};  new[newsub++]=x } } END { for (i=1; i< newsub; i++) {printf '$dq'/%s'$dq', new[i]} ; print '$dq''$dq' } '`"
+                 newpath="`echo $1     | $awk 'BEGIN { FS='$dq'/'$dq' } NR == 1 { newsub=1; new[1]='$dq' '$dq'; for (i=1; i<=NF; i++) { x=$i ; if ( x == '$dq'.'$dq' ) { continue } ; if ( x == '$dq''$dq' ) { continue } ; if ( x == '$dq'..'$dq' ) {newsub--; continue};  new[newsub++]=x } } END { for (i=1; i< newsub; i++) {printf '$dq'/%s'$dq', new[i]} ; print '$dq''$dq' } '`"
+                if [ "X$doubleslash" != "X" ] ; then
+                        newpath="/$newpath"
+                fi
+                ;;
+            X*)
+                newpath="`pwd`/$1"
+                newpath="`SY_InstallPrettyUpPath $newpath`"
+                ;;
+        esac
+
+
+        echo "$newpath"
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallPrettyUpPath( $* ): result '$newpath'" >&2
+        fi
+}
+#
+if [ "X$PB_ShowDeclares" != "X" ] ; then
+        echo "Declaring PB_InstallAddServicesToEtcServices()"
+fi
+#
+#
+#
+# PB_InstallAddServicesToEtcServices( void )
+#
+# one of these screwy routines which was morphed from writing out commands in the pbinstall
+# installation script to one which now runs in the pbinstall, pbuninstall, and pbremoteinstall
+# scripts
+#
+#
+if [ "X$PB_ShowDeclares" != "X" ] ; then
+        echo "Declaring PB_InstallAddServicesToEtcServices()"
+fi
+PB_InstallAddServicesToEtcServices()
+{
+
+
+        if [ "X$PB_ShowCallTrace" != "X" ] ; then
+                echo "In PB_InstallAddServicesToEtcServices( $@ )"
+        fi
+
+        errorfound=no
+        if [ "X$SY_ProductTitle" = "X" ] ; then
+                echo "PB_InstallAddServicesToEtcServices(): SY_ProductTitle is not set"
+                errorfound=yes
+        fi
+        if [ "X$sy_prefsuff" = "X" ] ; then
+                echo "PB_InstallAddServicesToEtcServices(): sy_prefsuff is not set"
+                errorfound=yes
+        fi
+
+        if [ "X$errorfound" = "Xyes" ] ; then
+                echo "$sy_MyFullName: Exiting due to previous errors."
+                exit 1
+        fi
+
+        if [ "X$inst_services" != 'Xyes' ] ; then
+                # Honor do no update /etc/services request...
+                return 0
+        fi
+
+        PB_InstallCleanEtcServices
+
+        new_services=""
+        if [ "X$inst_pbmport" != "X" ]; then
+                new_services="$new_services ${PBMASTERD} $inst_pbmport master"
+        fi
+        if [ "X$inst_pblport" != "X" ]; then
+                new_services="$new_services ${PBLOCALD} $inst_pblport local"
+        fi
+        if [ "X$inst_pblogdport" != "X"  ]; then
+                new_services="$new_services ${PBLOGD} $inst_pblogdport log"
+        fi
+        if [ "X$inst_pbgport" != "X" ]; then
+                new_services="$new_services ${PBGUID} $inst_pbgport gui"
+        fi
+        if [ "X$inst_pbgsport" != "X" ]; then
+                new_services="$new_services ${PBSGUID} $inst_pbgsport 'secure gui'"
+        fi
+        if [ "X$inst_syncport" != "X" ]; then
+                new_services="$new_services ${PBSYNCD} $inst_syncport 'log sync'"
+        fi
+
+        eval SY_InstallAddServicesToEtcServices $new_services
+
+        if [ "X$PB_ShowCallTrace" != "X" ] ; then
+                echo "Leaving PB_InstallAddServicesToEtcServices()"
+        fi
+}
+#
+#
+#
+# Clean out 'existing' stuff in $services
+#
+PB_InstallCleanEtcServices()
+{
+
+    if [ "X$inst_services" != 'Xyes' ] ; then
+        # Honor do no update /etc/services request...
+        return 0
+    fi
+    LC_ALL=$sav_LC_ALL #U#
+    export LC_ALL
+    SY_InstallCleanEtcServices ${SY_ProductRegexp} ${PBMASTERD} ${PBLOCALD} ${PBGUID} ${PBSGUID} ${PBLOGD} ${PBSYNCD}
+    result=$? #return $?
+    LC_ALL=C
+    export LC_ALL
+    return $result
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCleanEtcServices()"
+fi
+#
+#
+# Clean out 'existing' stuff in $services
+#
+#       $1 ... $#  service names 
+#
+SY_InstallCleanEtcServices()
+{
+    LC_ALL=C #U#
+
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallCleanEtcServices( $* )"
+    fi
+
+    if [ "X$services" = "X" -o "X$services" = "undefined" ] ; then
+        SY_InstallCheckEtcServicesExist
+    fi
+
+    if [ "X${sy_prefsuff}" = "X" -o "X${sy_prefsuff}" = "X " ] ; then
+        tmp=" "
+    else
+        if [ "X$arch" = "Xx86_qnxA" ] ; then    # Oh the things we do for QNX... 
+                tmp=" '`echo ${sy_prefsuff} | $sed -e s/^\ // `' "
+        else
+                tmp=" '`echo ${sy_prefsuff} | $sed -e \"s/^ //\" `' "
+        fi
+    fi
+
+
+    if [ "X$sy_install_services_backup" = "Xunknown" ] ; then
+        SY_InstallBackupFile $services sybak sy_install_services_backup
+        sy_install_services_backup="$sy_backupfilename"
+    else
+        return 0        # already backed up and cleaned out.
+    fi
+
+    echo "Removing ${SY_ProductTitle}${tmp}service definitions (if any) from $services."
+
+    # Now, however, we have to build the sed command line off of the argument list...
+    # the first one is to do the title line... remembering sy_prefsuff...
+
+
+    sedprog="-e '/^#[   ]*${SY_ProductRegexp} daemons[  ]*${sy_prefsuff}[       ]*$/d'"
+    while [ $# -gt 0 ] ; do
+        sedprog="$sedprog -e '/^$1[     ]/d'"
+        shift
+    done
+    eval=${eval:-eval}
+    $eval $sed $sedprog $sy_install_services_backup > $services
+
+
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallCleanEtcServices( $* )"
+    fi
+}
+#
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCheckEtcServicesExist()"
+fi
+#
+#
+# Ensure /etc/services exists, fatal error if not...
+#
+SY_InstallCheckEtcServicesExist()
+{
+        services=undefined
+        if [ -h /etc/services ] ; then
+                svcs_tgtfile=`(cd /etc ; ls -l services ) | $grep -e '->' | $awk '{print $NF};'`
+                echo $svcs_tgtfile | $grep "^/" 2>&1 >/dev/null
+                status=$?
+                if [ "$status" = '0' ]; then
+                        services="$svcs_tgtfile"
+                else
+                        # display full service path nicely; without /./ in between
+                        dir_name=`dirname ${svcs_tgtfile}`
+                        base_name=`basename ${svcs_tgtfile}`
+                        disp_path=`(cd /etc ; cd ${dir_name}; pwd )`
+                        services=${disp_path}/${base_name}
+                fi
+        elif [ -f /etc/services ] ; then
+                services="/etc/services"
+        fi
+
+        if [ "X$services" = 'Xundefined' -o "X$services" = "X" -o "X$services" = "/etc/" ]; then
+            echo "SY_InstallCheckEtcServicesExist(): Cannot find a /etc/services file!"  1>&2
+            exit 3 #SY was# 1
+        fi
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallBackupFile( $* )"
+fi
+#
+#
+SY_InstallBackupFile()
+#
+#       Backup the indicated file uniquely as requested and return the backup filename
+#
+#       Argument 1      filename
+#       Argument 2      backup name 'type' (sybak, old, bak, curtime, ctime, mtime, atime)
+#       Argument 3      variable name to receive the full pathspec of the backup file
+#
+#       NOTE WELL:  The original file is renamed (mv'ed) to the backup file
+#       for the sybak and 'time' backup filename formats.
+#       This is intentional since our processing is to modify the backup copy
+#       of a file back into the original filename.
+#
+{
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallBackupFile( $* )"
+        fi
+
+        installbackupfileerror=0
+
+        if [ $# -ne 3 ] ; then
+                echo "Sy_InstallBackupFile(): invalid number of arguments '$#'"
+                installbackupfileerror=1
+        fi
+        if [ ! -f "$1" ] ; then
+                echo "Sy_InstallBackupFile($1): File does not exist."
+                installbackupfileerror=1
+        fi
+        if [ "$installbackupfileerror" = "1" ] ; then
+                echo "SY_InstallBackupFile(): Exiting due to previously reported errors."
+                exit 1
+        fi
+
+        backup_file_type="$2"
+        sy_backupfilename=""
+        filetype_suffix=""
+        awkdateprog='{printf "%s_%s_%s\n", $6, $7, $8 ; exit }'
+        case "X${backup_file_type}" in
+            Xsybak)
+                sy_backupfilename="$1.$2"
+                filetype_suffix=".0000"
+                ;;
+            Xold)
+                sy_backupfilename="$1.$2"
+                filetype_suffix=".0000"
+                ;;
+            Xbak)
+                sy_backupfilename="$1.$2"
+                filetype_suffix=".0000"
+                ;;
+            Xcurtime)
+                sy_backupfilename="$1.`LC_ALL=C date '+%Y%m%d_%H%M%S'`"
+                ;;
+            Xatime)
+                #bkup_timestamp=`${ls} -lu "$1" | $sed -e 's/[  ]\+/ /g' | cut -d' ' -f6-8 | $sed -e 's/ /_/g'`
+                bkup_timestamp=`${ls} -lu "$1" | $awk "$awkdateprog"`
+                sy_backupfilename="$1.atime.$bkup_timestamp"
+                ;;
+            Xctime)
+                bkup_timestamp=`${ls} -lc "$1" | $sed -e 's/[   ]\+/ /g' | $awk "$awkdateprog"`
+                sy_backupfilename="$1.ctime.$bkup_timestamp"
+                #filetype_suffix=".0000"
+                ;;
+            Xmtime)
+                bkup_timestamp=`${ls} -l "$1" | $awk "$awkdateprog"`
+                sy_backupfilename="$1.mtime.$bkup_timestamp"
+                ;;
+            X*)
+                echo "SY_InstallBackupFile($*): unimplemented backup type of '$2'.  Exiting..."
+                exit 1
+                ;;
+        esac
+
+
+        if [ "X$filetype_suffix" != "X" ] ; then
+                filetype_counter=0
+                backupfile_list="`ls -1r ${sy_backupfilename}.[0-9][0-9][0-9][0-9] 2>/dev/null`"
+                if [ "X$backupfile_list" = "X" ] ; then
+                        filetype_suffix=".0000"
+                else
+                    file_counter=0
+                    if [ "X$SY_InstallBackupLimit" = "X" ]; then
+                        backuplimit=10
+                    else
+                        backuplimit=$SY_InstallBackupLimit
+                    fi
+                    if [ $backuplimit -lt 4 ] ; then
+                        backuplimit=4   # minimum standards...
+                    fi
+                    for item in $backupfile_list; do
+                        file_counter=`expr $file_counter + 1`
+                        if [ $file_counter -eq 1 ] ; then
+                                awkprog="{print "'$NF'"}"
+                                filetype_counter=`echo $item | $awk -F'.' "$awkprog"`
+                                if [ "$filetype_counter" != "0000" ] ; then # oh the things we do for QNX
+                                        filetype_counter="`echo $filetype_counter | $sed -e 's/^000//' -e 's/^00//' -e 's/^0//'`"
+                                fi
+                                filetype_counter=`expr $filetype_counter + 1`
+                                if   [ $filetype_counter -lt 10 ]; then
+                                        filetype_suffix=".000$filetype_counter"
+                                elif [ $filetype_counter -lt 100 ]; then
+                                        filetype_suffix=".00$filetype_counter"
+                                elif [ $filetype_counter -lt 1000 ]; then
+                                        filetype_suffix=".0$filetype_counter"
+                                else
+                                        filetype_suffix=".$filetype_counter"
+                                fi
+                        elif [ $file_counter -ge 2 -a $file_counter -le $backuplimit ] ; then
+                                continue
+                        else
+                                ${rm} -f "$item"
+                                continue
+                        fi
+                    done
+                fi
+        fi
+        sy_backupfilename="$sy_backupfilename$filetype_suffix"
+        case ${backup_file_type} in
+            sybak|*time)
+                mv=${mv:-/bin/mv}
+                ${mv} "$1" "$sy_backupfilename"
+                ;;
+            *)
+                cp=${cp:-/bin/cp}
+                ${cp} "$1" "$sy_backupfilename"
+                ;;
+        esac
+
+        sy_backup_result_filename="$sy_backupfilename"
+        eval "$3='$sy_backupfilename'"
+
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "Leaving SY_InstallBackupFile( $* )"
+        fi
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallAddServicesToEtcServices( )"
+fi
+#
+#
+# SY_InstallAddServicesToEtcServices( )
+#
+# one of these screwy routines which was morphed from writing out commands in the pbinstall
+# installation script to one which now runs in the pbinstall, pbuninstall, and pbremoteinstall
+# scripts and the pd analogs, too...
+#
+# args:
+#
+#       $1 $2 $3  ...  service name, port, and short title -- in triples
+#
+#
+# example first three arguments:
+#
+#               pbmasterd 24345 master
+#
+# RESTRICTION:  Must be called at 'action' level (not 'configuration' level)
+#
+SY_InstallAddServicesToEtcServices()
+{
+
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallAddServicesToEtcServices( $* )"
+fi
+
+errorfound=no
+if [ "X$SY_ProductTitle" = "X" ] ; then
+        echo "SY_InstallAddServicesToEtcServices(): SY_ProductTitle is not set"
+        errorfound=yes
+fi
+if [ "X$sy_prefsuff" = "X" ] ; then
+        echo "SY_InstallAddServicesToEtcServices(): sy_prefsuff is not set"
+        errorfound=yes
+fi
+
+temp_numb_1=$#
+temp_numb_2=`expr $temp_numb_1 / 3`
+temp_numb_2=`expr $temp_numb_2 \* 3`
+
+if [ $temp_numb_1 -ne $temp_numb_2 -o $temp_numb_1 -eq 0 ] ; then
+        echo " "
+        echo "SY_InstallAddServicesToEtcServices($*): invalid number of arguments ( $# not divisible by 3)"
+        echo "Usage: SY_InstallAddServicesToEtcServices( [name port title] ... )"
+        echo " "
+        errorfound=yes
+fi
+
+if [ "X$errorfound" = "Xyes" ] ; then
+        echo "$sy_myFullName: Exiting due to previous errors."
+        exit 1
+fi
+
+sy_clean_args=""
+cleanflag="0"
+for item in $* ; do
+        case $cleanflag in
+            0)
+                cleanflag=1
+                sy_clean_args="$sy_clean_args $item"
+                ;;
+            1)
+                cleanflag=2
+                ;;
+            2)
+                cleanflag=0
+                ;;
+        esac
+done
+#
+#
+# call SY_InstallCleanEtcServices with new argument list
+
+LC_ALL=$sav_LC_ALL #U#
+export LC_ALL
+SY_InstallCleanEtcServices "$SY_ProductRegexp" $sy_clean_args
+LC_ALL=C
+export LC_ALL
+
+#
+#
+# Now update the services file...
+#
+
+echo "Adding ${SY_ProductTitle} service definitions to $services."
+
+echo=${echo:-/bin/echo}
+$echo "# $SY_ProductTitle daemons  ${sy_prefsuff} " >> $services
+
+while [ $# -gt 0 ] ; do
+        case X$2 in
+            X[0-9]*)
+                awkprog="d1=\"$1\" ;  d2=\"$2/tcp\" ;  d3=\"# $SY_ProductTitle $3 daemon $sy_prefsuff\" ; "
+                $echo " " | $awk ' BEGIN {'"$awkprog"' } {printf "%-20s %-20s %s\n", d1, d2, d3; exit}' >> $services
+                ;;
+            X/*)
+                # nothing for local sockets...
+                ;;
+        esac
+        shift
+        shift
+        shift
+done
+
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallAddServicesToEtcServices( $* )"
+fi
+}
+#
+SY_InstallRemoveLegacyManifestDirectory()
+{
+    if [ -d ${smf_manifiest_directory_legacy} ] ; then
+        ls ${smf_manifiest_directory_legacy}/*.xml >/dev/null 2>&1
+        if [ $? -ne 0 ] ; then
+            if [ -h ${smf_manifiest_directory} ] ; then $rm -f ${smf_manifiest_directory} ; fi
+            $rm -rf ${smf_manifiest_directory_legacy}
+        fi
+    fi
+
+}
+#
+#
+# traverse the lists and unconfigure all specified...
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallUnconfigureSuperDaemons(  )"
+fi
+#
+#
+# Arguments... possible superdaemon 'names' to unconfigure...
+#
+SY_InstallUnconfigureSuperDaemons()
+{
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallUnconfigureSuperDaemons( $* )"
+    fi
+    if [ $# -le 0 ] ; then
+        echo "SY_InstallUnconfigureSuperDaemons(): no arguments supplied."
+        exit 1
+    fi
+
+    if [ "X$sol10svcs_capable" = "Xyes" ] ; then
+        echo "Removing ${SY_ProductTitle}${tmp}service definitions (if any) from SMF."
+        if [ "$sy_sol_manifest_import" = "no" ] ; then
+            for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                svccfg list | grep network/${prefix}${item}${suffix} 2>&1 > /dev/null
+                stat=$?
+                if [ $stat -eq 0 ] ; then
+                        svcadm disable svc:/network/${prefix}${item}${suffix}  > /dev/null 2>&1
+                        svccfg delete -f  svc:/network/${prefix}${item}${suffix}:default  > /dev/null 2>&1
+                        svccfg delete -f  svc:/network/${prefix}${item}${suffix} > /dev/null 2>&1
+                fi
+                tmpxmlfile=${smf_manifiest_directory}/${prefix}${item}${suffix}.xml
+                ${rm} -f ${tmpxmlfile}
+            done
+        else
+            # Sol11+ sy_sol_manifest_import yes
+            for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                tmpxmlfile=${smf_manifiest_directory}/${prefix}${item}${suffix}.xml
+                ${rm} -f ${tmpxmlfile}
+            done
+            svcadm restart manifest-import
+        fi
+        SY_InstallRemoveLegacyManifestDirectory
+    else
+        if [ "X$launchd_capable" = "Xyes" ] ; then
+                echo "Removing ${SY_ProductTitle}${tmp}property lists (if any) from launchd. "
+                for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                   launchctl list | grep com.symark.${prefix}${item}${suffix} 2>&1 > /dev/null
+                   stat=$?
+                   if [ $stat -eq 0 ] ; then
+                        launchctl unload ${launchd_plist_directory}/com.symark.${prefix}${item}${suffix}.plist 2>&1 > /dev/null
+                   fi
+                   tmpplistfile=${launchd_plist_directory}/com.symark.${prefix}${item}${suffix}.plist
+                   ${rm} -f ${tmpplistfile}
+                done
+        else
+           i=0
+           for file in $configFileNames; do
+                # increment i, get filetype from list
+                # clean loop is seperate... otherwise we nuke previous config on multiple configed systems
+                i=`expr $i + 1`
+                if [ "$file" != "undefined" ]; then
+                        conffiletype="`echo $configFileTypes | $awk  '{ print $'$i' }'`"
+                        SY_InstallBackupFile $file sybak backup_filename
+                        if [ ! -f $sy_backupfilename ] ; then
+                                echo "SY_InstallUnconfigureSuperDaemons(): backup file $sy_backupfilename was not created"
+                                exit 2
+                        fi
+                        SY_InstallCleanSuperDaemon $conffiletype $file $sy_backupfilename $*
+                fi
+           done
+        fi
+    fi
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallUnconfigureSuperDaemons( $* )"
+    fi
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCleanSuperDaemon( $* )"
+fi
+
+SY_InstallCleanSuperDaemon() {
+        # $1     superdaemon type
+        # $2     config file name
+        # $3     config file backup name
+        # $4 ... service/daemon names
+
+        # NOTE:  All services must be cleaned in the same call...
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallCleanSuperDaemon( $* )"
+        fi
+
+
+        # ensure there are at least 4 argments
+        # pull the first three off and save them
+        if [ $# -lt 4 ] ; then
+                echo "SY_InstallCleanSuperDaemon( $* ):  insufficient arguments ( < 4 )"
+                exit 1
+        fi
+
+        sd_type=$1
+        sd_cfgfile_name="$2"
+        sd_cfgfile_bkup="$3"
+        sd_title_regexp="$SY_ProductRegexp"
+
+        shift
+        shift
+        shift
+
+        if [ "X${sd_type}" = "Xunknown" ] ; then
+                return 0
+        fi
+        if [ "X${sd_type}" = "Xundefined" ] ; then
+                return 0
+        fi
+
+        if [ "X${sd_cfgfile_name}" = "Xunknown" ] ; then
+                return 0
+        fi
+        if [ "X${sd_cfgfile_name}" = "Xundefined" ] ; then
+                return 0
+        fi
+
+        sd_stuff="' ${sd_type} ${sd_cfgfile_name} '"
+        echo " $sy_install_sd_cfgfiles_cleaned " | $grep "${sd_stuff}" 2>&1 > /dev/null
+        stat=$?
+        if [ $stat -eq 0 ] ; then
+                return 0        # already cleaned
+        fi
+        sy_install_sd_cfgfiles_cleaned=" ${sy_install_sd_cfgfiles_cleaned} ${sd_stuff} "
+
+        echo "Removing any ${SY_ProductTitle} definitions from SuperDaemon $sd_type file $sd_cfgfile_name"
+
+        #
+        # Then try to figure out an intelligent way to loop through the rest of the argument list
+        # 
+        #
+        # and also through ksh's quoting rules, since they differ from
+        # both sh and csh
+        #
+        service_list=""
+        eval=${eval:-eval}
+        case $sd_type in
+            xinetd)
+                dir="`$grep '^[         ]*includedir' $sd_cfgfile_bkup | $awk '{print $2}'`"
+                # if an include dir spec is found then rm any contents found
+                if [ "X$dir" != "X" ]; then
+                        for directory in $dir ; do      # someone _*WILL*_ have more than one includedir...check them all!!!
+                                for item in $* ; do
+                                        if [ -f $directory/${item} ]; then
+                                                $rm $directory/${item}
+                                        fi
+                                done
+                        done
+                fi
+                # ensure it isn't in xinetd.conf...
+                service_list="$sed "
+                for item in $* ; do
+                        service_list="${service_list}-e '/^[    ]*service[      ]*${item}/,/^[  ]*}/d' "
+                done
+                $eval $service_list $sd_cfgfile_bkup > $sd_cfgfile_name
+                ;;
+            inetd)
+                service_list="-e '/^#[  ]*${sd_title_regexp}[   ]*.*daemon[     ]*${sy_prefsuff}[       ]*\$/d' -e '/^#[        ]*${sd_title_regexp}[   ]*.*[   ]*${sy_prefsuff}[       ]*daemon[       ]*\$/d'"
+                for item in $* ; do
+                        service_list="${service_list} -e '/^[   ]*${item}[      ][      ]*/d'"
+                done
+                $eval $sed $service_list $sd_cfgfile_bkup > $sd_cfgfile_name
+                ;;
+            sol10svcs)
+                #
+                if [ "$sy_sol_manifest_import" = "no" ] ; then
+                    for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                        svccfg list | grep network/${prefix}${item}${suffix} 2>&1 > /dev/null
+                        stat=$?
+                        if [ $stat -eq 0 ] ; then
+                                svcadm disable svc:/network/${prefix}${item}${suffix}
+                                svccfg delete -f  svc:/network/${prefix}${item}${suffix}:default
+                                svccfg delete -f  svc:/network/${prefix}${item}${suffix}
+                        fi
+                        tmpxmlfile=${smf_manifiest_directory}/${prefix}${item}${suffix}.xml
+                        ${rm} -f ${tmpxmlfile}
+                    done
+                else
+                    # Sol11+ sy_sol_manifest_import yes
+                    for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                        tmpxmlfile=${smf_manifiest_directory}/${prefix}${item}${suffix}.xml
+                        ${rm} -f ${tmpxmlfile}
+                    done
+                    svcadm restart manifest-import
+                fi
+                ;;
+            launchd)
+                #
+                for item in pbmasterd pblocald pblogd pbguid pbsguid pbsyncd ; do
+                        launchctl list | grep com.symark.${prefix}${item}${suffix} 2>&1 > /dev/null
+                        stat=$?
+                        if [ $stat -eq 0 ] ; then
+                                launchctl unload ${launchd_plist_directory}/com.symark.${prefix}${item}${suffix}.plist 2>&1 > /dev/null
+                        fi
+                        tmpplistfile=${launchd_plist_directory}/com.symark.${prefix}${item}${suffix}.plist
+                        ${rm} -f ${tmpplistfile}
+                done
+                ;;
+            undefined)
+                ;;
+            *)
+                echo "SY_InstallCleanSuperDaemon( ) invalid SuperDaemon config file type of '$sd_type' specified"
+                exit 1
+                ;;
+
+        esac
+
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "Leaving SY_InstallCleanSuperDaemon( $* )"
+        fi
+
+}
+#
+if [ "X$PB_ShowDeclares" != "X" ] ; then
+        echo "Declaring PB_InstallConfigureSuperDaemons()"
+fi
+#
+# Remember those lists we so painstakeingly built... now we install off of them...
+#
+# Daemons are product specific so these details can't be in SY_
+#
+#echo "Declaring PB_InstallConfigureSuperDaemons"
+
+PB_InstallConfigureSuperDaemons()
+{
+        if [ "X$PB_ShowCallTrace" != "X" ] ; then
+                echo "In PB_InstallConfigureSuperDaemons( $@ )"
+        fi
+        #
+        # The SY_ stuff requires only one pass through the file
+        # since it insists upon doing a clean first...
+
+        if [ "$inst_master" = "yes" ]; then
+            if [ $inst_daemon_psspace -gt 0 ]; then
+                inst_pbmopt="$inst_pbmopt -i $daemon_psstring"
+            fi
+            daemonarglist="$daemonarglist '${PBMASTERD}' '${PBMASTERD}' 'master ${sy_prefsuff}' '$inst_pbmopt' $inst_pbmport"
+            if [ -x $pbbin/pbpatton ] ; then
+                $pbbin/pbpatton
+            else
+                echo "$sy_MyFullName : License Initialization failure" 2>&1 > /dev/null
+            fi
+        fi
+        if [ "$inst_local" = "yes" ]; then
+            if [ $inst_daemon_psspace -gt 0 ]; then
+                inst_pblopt="$inst_pblopt -i $daemon_psstring"
+            fi
+            daemonarglist="$daemonarglist '${PBLOCALD}' ${PBLOCALD} 'local ${sy_prefsuff}' '$inst_pblopt' $inst_pblport"
+        fi
+
+        if [ "$inst_guid" = "yes" ]; then
+            daemonarglist="$daemonarglist '${PBGUID}' '${PBGUID}' 'gui ${sy_prefsuff}' '$inst_pbgopt' $inst_pbgport"
+        fi
+
+        if [ "$inst_sguid" = "yes" ]; then
+            daemonarglist="$daemonarglist '${PBSGUID}' '${PBGUID}' 'gui ${sy_prefsuff}' '-S $inst_pbgsopt' $inst_pbgsport"
+        fi
+
+        if [ "$inst_logd" = "yes" ]; then
+            if [ $inst_daemon_psspace -gt 0 ]; then
+                inst_pblogopt="$inst_pblogopt -i $daemon_psstring"
+            fi
+            daemonarglist="$daemonarglist '${PBLOGD}' ${PBLOGD} 'log ${sy_prefsuff}' '${inst_pblogopt}' $inst_pblogdport"
+        fi
+
+        if [ "$inst_syncd" = "yes" ]; then
+            daemonarglist="$daemonarglist '${PBSYNCD}' ${PBSYNCD} 'sync ${sy_prefsuff}' '${inst_pbsyncd_opt}' $inst_syncport"
+        fi
+        # arg1          service name
+        # arg2          program basename
+        # arg3          identifying word (master, log, ...) for title(s)
+        # arg4          command line options
+        # arg5          tcp port to use
+        #echo eval SY_InstallConfigureSuperDaemons $daemonarglist
+        eval SY_InstallConfigureSuperDaemons $daemonarglist
+        if [ "X$PB_ShowCallTrace" != "X" ] ; then
+                echo "Leaving PB_InstallConfigureSuperDaemons()"
+        fi
+}
+#
+#
+# Remember those superdaemon configuration lists we so painstakeingly built... 
+#       now we install off of them...
+#
+#
+# Unfortunately we need a list of the other stuff to configure, so the argument list
+# is UGLY...
+#
+# Arguments are in sets of quadruples:
+#
+# arg1          service name
+# arg2          identifying word (master, log, ...) for title(s)
+# arg3          command line options
+# arg4          tcp port to use 
+#
+
+
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallConfigureSuperDaemons()"
+fi
+
+SY_InstallConfigureSuperDaemons()
+{
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallConfigureSuperDaemons( [argcount=$#] $@ )"
+        echo "In SY_InstallConfigureSuperDaemons( [argcount=$#] $1 , $2 , $3 , $4 , $5 , $6 , $7 , $8 )"
+    fi
+    errorfound=no
+    if [ "X$sy_prefsuff" = "X" ] ; then
+        echo "SY_InstallConfigureSuperDaemons(): sy_prefsuff is not set"
+        errorfound=yes
+    fi
+
+    argmodlo=5
+    i=$#
+    i=`expr $i / $argmodlo `
+    i=`expr $i \* $argmodlo `
+    if [ $i -ne $# ] ; then
+        echo "SY_InstallConfigureSuperDaemons( $* ): number of arguments ($#) is not divisible by $argmodlo "
+        errorfound=yes
+    fi
+    if [ "X$errorfound" = "Xyes" ] ; then
+        echo "$sy_MyFullName: exiting due to previously reported errors."
+        exit 1
+    fi
+
+    if [ "X$sol10svcs_capable" = "Xno" ] ; then
+            if [ "X$launchd_capable" = "Xno" ] ; then
+                echo "Adding ${SY_ProductTitle} definitions to SuperDaemon configurations `echo $configFileNames | $sed -e 's/undefined//g'`."
+            else
+                echo "Adding ${SY_ProductTitle} property lists to launchd. "
+            fi
+    else
+            echo "Adding ${SY_ProductTitle} definitions to SMF."
+    fi
+
+    while [ $# -gt 0 ] ; do
+            #echo "SY_InstallConfigureSuperDaemons(): processing $1, $2, $3, $4, $5, $6 "
+            #echo "configFileNames='$configFileNames'"
+            i=0
+            for file in $configFileNames; do
+                # increment i, get filetype from list
+                i=`expr $i + 1`
+                #echo " Processing file # $i name '$file'"
+                if [ -x $file ] ; then
+                        continue
+                fi
+                conffile="`echo $configureDaemon  | cut -d' ' -f$i`"
+                conffiletype="`echo $configFileTypes  | cut -d' ' -f$i`"
+                if [ "X$conffiletype" = "Xundefined" -o "X$conffile" != "Xyes" ] ; then
+                        continue
+                fi
+
+                SY_InstallSuperDaemonAddService $conffiletype $file "${1}" "${2}" "${SY_ProductTitle} $3 daemon  $sy_prefsuff" "$4" "$5"
+            done
+        shift
+        shift
+        shift
+        shift
+        shift
+    done
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallConfigureSuperDaemons( $* )"
+    fi
+}
+#
+SY_InstallProcessManifestDirectory()
+{
+    mkdir=${mkdir:-/bin/mkdir}
+    if [ -d ${smf_manifiest_directory_legacy} ] ; then
+        ls ${smf_manifiest_directory_legacy}/*.xml >/dev/null 2>&1
+        if [ $? -ne 0 ] ; then
+            if [ -h ${smf_manifiest_directory} ] ; then $rm -f ${smf_manifiest_directory} ; fi
+            $rm -rf ${smf_manifiest_directory_legacy}
+            $mkdir -p ${smf_manifiest_directory}
+        else
+            if [ ! -h ${smf_manifiest_directory} ] ; then
+                ln -s ${smf_manifiest_directory_legacy} ${smf_manifiest_directory}
+            fi
+        fi
+    else
+        $mkdir -p ${smf_manifiest_directory}
+    fi
+
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallSuperDaemonAddService()"
+fi
+SY_InstallSuperDaemonAddService()
+{
+#
+#  Usage:
+#    SY_InstallSuperDaemonAddService $superdaemontype configfilename service_type #                       service_pgm_basename "service title" "cmdlineoptions" portnumber
+#
+# arguments:
+#       super-daemon type       (xinetd, inetd, sol10svcs, launchd, inittab, rc_d, or none)
+#       config file name        (/etc/xinetd.conf, /etc/inetd, etc...)
+#       service type            (pbmasterd, pblocald, ...)
+#       service program basename (service type minus pbsguid)
+#       service title           string description
+#       cmd line options        (as a word)
+#       portnumber              portnumber for service to use
+#       
+#
+#
+#
+
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "In SY_InstallSuperDaemonAddService( $1 . $2 . $3 . $4 . $5 . $6 . $7 )"
+fi
+
+case "X$7" in
+    X[0-9]*)
+        ;;
+    X*) # no local sockets (Unix Domain Sockets) go in the superdaemon cfg file.
+        return 0
+        ;;
+esac
+
+echo=${echo:-/bin/echo}
+case $1 in
+    xinetd)
+        dir="`$grep includedir "$2" | $awk '{print $2}'`"
+        if [ "$dir" != "" ] ; then
+            inetdAddServiceToFile="$dir/$3"
+        else
+            inetdAddServiceToFile="$2"
+        fi
+        if [ ! -f $inetdAddServiceToFile ] ; then
+                touch $inetdAddServiceToFile
+                chown root $inetdAddServiceToFile
+                chmod 700 $inetdAddServiceToFile
+        fi
+        $cat >> $inetdAddServiceToFile << __EOF__
+# $5
+#
+service $3
+{
+__EOF__
+        # IPv6
+        if [ "$IPv6capable" = "yes" ] ; then
+        $cat >> $inetdAddServiceToFile << __EOF__
+        flags        = REUSE IPv6
+__EOF__
+        else
+        $cat >> $inetdAddServiceToFile << __EOF__
+        flags        = REUSE
+__EOF__
+        fi
+        $cat >> $inetdAddServiceToFile << __EOF__
+        socket_type  = stream
+        wait         = no
+        user         = root
+        server       = $inst_daemondir/$4
+__EOF__
+        if [ ! -z "$6" ]; then
+            $cat >> $inetdAddServiceToFile << __EOF__
+        server_args = $6
+__EOF__
+        fi
+        $cat >> $inetdAddServiceToFile << __EOF__
+        type       = UNLISTED
+        port       = $7
+        protocol   = tcp
+        cps = 25000 1
+}
+__EOF__
+        ;;
+    inetd)
+        $echo "# $5" >> $2
+        fmt="%-20s %-10s %-10s %-10s %-10s %s/%s %s $6"
+        # IPv6
+        if [ "$IPv6capable" = "yes" ] ; then
+            ($echo "$fmt" ; echo "$3 $4 $inst_daemondir")                 | $awk 'NR == 1 { fmt = $0 ; next} NR == 2 { printf fmt, $1, "stream", "tcp6", "nowait", "root", $3, $2, $2 ; print ""; exit}'                 >> $2
+        else
+            ($echo "$fmt" ; echo "$3 $4 $inst_daemondir")                 | $awk 'NR == 1 { fmt = $0 ; next} NR == 2 { printf fmt, $1, "stream", "tcp", "nowait", "root", $3, $2, $2 ; print ""; exit}'                 >> $2
+        fi
+        ;;
+    sol10svcs)
+        #
+        #set -xv
+
+        #mkdir=${mkdir:-/bin/mkdir}
+        #$mkdir -p ${smf_manifiest_directory}
+        SY_InstallProcessManifestDirectory
+
+        tmpxmlfile=${smf_manifiest_directory}/${3}.xml
+
+        cat=${cat:-/bin/cat}
+        $cat > ${tmpxmlfile} << __EOF__
+<?xml version='1.0'?>
+<!DOCTYPE service_bundle SYSTEM '/usr/share/lib/xml/dtd/service_bundle.dtd.1'>
+<!--
+    Service manifest for the ${3} service.
+
+    Generated by
+-->
+
+<service_bundle type='manifest' name='inetconv:${3}'>
+
+<service
+        name='network/${3}'
+        type='service'
+        version='1'>
+
+        <create_default_instance enabled='true'/>
+
+        <restarter>
+                <service_fmri value='svc:/network/inetd:default' />
+        </restarter>
+
+        <!--
+            Set a timeout of 0 to signify to inetd that we don't want to
+            timeout this service, since the forked process is the one that
+            does the service's work. This is the case for most/all legacy
+            inetd services; for services written to take advantage of SMF
+            capabilities, the start method should fork off a process to
+            handle the request and return a success code.
+        -->
+        <exec_method
+                type='method'
+                name='inetd_start'
+                exec='${inst_daemondir}/${4} ${6}'
+                timeout_seconds='0'>
+                <method_context>
+                        <method_credential user='root' group='root' />
+                </method_context>
+        </exec_method>
+
+        <!--
+            Use inetd's built-in kill support to disable services.
+        -->
+        <exec_method
+                type='method'
+                name='inetd_disable'
+                exec=':kill'
+                timeout_seconds='0'>
+        </exec_method>
+
+
+        <property_group name='inetd' type='framework'>
+                <propval name='name' type='astring' value='${3}' />
+                <propval name='endpoint_type' type='astring' value='stream' />
+__EOF__
+        # IPv6
+        if [ "$IPv6capable" = "yes" ] ; then
+        $cat >> ${tmpxmlfile} << __EOF__
+                <propval name='proto' type='astring' value='tcp6' />
+__EOF__
+        else
+        $cat >> ${tmpxmlfile} << __EOF__
+                <propval name='proto' type='astring' value='tcp' />
+__EOF__
+        fi
+        $cat >> ${tmpxmlfile} << __EOF__
+                <propval name='wait' type='boolean' value='false' />
+                <propval name='isrpc' type='boolean' value='false' />
+        </property_group>
+
+        <stability value='External' />
+
+        <template>
+                <common_name>
+                        <loctext xml:lang='C'> ${3} </loctext>
+                </common_name>
+                <description>
+                        <loctext xml:lang='C'>${5} </loctext>
+                </description>
+                <documentation>
+                        <manpage title='${3}' section='1'
+                                manpath='/usr/share/man' />
+                </documentation>
+        </template>
+</service>
+
+</service_bundle>
+__EOF__
+        if [ "$sy_sol_manifest_import" = "no" ] ; then
+            svccfg << __EOF__
+            import ${tmpxmlfile}
+            #list
+            #select svc:/network/${3}
+            #list
+            #listprop
+__EOF__
+            svcadm enable  svc:/network/${3}
+            stat=$?
+        else
+            # Sol11+ sy_sol_manifest_import yes
+            svcadm restart manifest-import
+        fi
+        ;;
+    launchd)
+        tmpplistfile=${launchd_plist_directory}/com.symark.${3}.plist
+        cat=${cat:-/bin/cat}
+        $cat > ${tmpplistfile} << __EOF__
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+        <key>Label</key>
+        <string>com.symark.${3}</string>
+        <key>ProgramArguments</key>
+        <array>
+                <string>${inst_daemondir}/${3}</string>
+__EOF__
+        if [ "X$6" != "X" ] ; then
+           $cat >> ${tmpplistfile} << __EOF__
+                <string>${6}</string>
+__EOF__
+        fi
+        $cat >> ${tmpplistfile} << __EOF__
+        </array>
+        <key>Sockets</key>
+        <dict>
+                <key>Listeners</key>
+                <dict>
+                        <key>SockServiceName</key>
+                        <string>${3}</string>
+                        <key>SockType</key>
+                        <string>stream</string>
+                        <key>SockPathMode</key>
+                        <integer>${7}</integer>
+                </dict>
+        </dict>
+        <key>UserName</key>
+        <string>root</string>
+        <key>inetdCompatibility</key>
+        <dict>
+                <key>Wait</key>
+                <false/>
+        </dict>
+</dict>
+</plist>
+__EOF__
+        launchctl load ${launchd_plist_directory}/com.symark.${3}.plist
+        stat=$?
+        ;;
+    *)
+        echo "SY_InstallSuperDaemonAddService(): invalid superdaemon type of '$1' specified"
+        exit
+        ;;
+esac
+
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+        echo "Leaving SY_InstallSuperDaemonAddService( $1 . $2 . $3 . $4 . $5 . $6 . $7 )"
+fi
+
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallRestartSuperDaemons()"
+fi
+#
+# Go find active superdaemons and kindly ask them to reload their
+# configuration files
+#
+# Then, after that is done, check to make sure that the superdaemons
+# are still active.
+#
+SY_InstallRestartSuperDaemons()
+{
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "In SY_InstallRestartSuperDaemons( $arch )"
+        fi
+
+        if [ "X$sol10svcs_capable" != "Xno" ] ; then
+                return 0        # Solaris 10 doesn't do this...
+        fi
+
+        if [ "X$launchd_capable" != "Xno" ] ; then
+                return 0        # launchd doesn't do this...
+        fi
+
+        if [ "X$arch" = "X" ] ; then
+                echo "SY_InstallRestartSuperDaemons(): symbol arch not set."
+                echo "    SuperDaemon(s) will need to be manually signalled to reload"
+                echo "    their configuration file(s)."
+                return 1
+        fi
+
+        echo "Reloading SuperDaemon Configurations..."
+
+        awkfield='$5'
+        inetd_pids=""
+        xinetd_pids=""
+        killed_xinetd_pids=""
+        killed_inetd_pids=""
+
+        # HUP or USR2 inetd/xinetd
+        case $arch in
+        sun3_sunos|sparc_sunos|alpha_linux)
+            ;;
+        x86_linux*|x86_64_linux*|x86_bsdi4|s390_linux*|power_linux*|ia64_linux*|powerpc_apple*|i386_apple*|powerpc_linux*)
+            ;;
+        rs6000_aix*)
+            #
+            # NOTE: HUP'ing inetd may not always succeed. In that case,
+            # try restarting the daemon.
+            #
+            if [ -x /usr/sbin/inetimp ] ; then
+                    /usr/sbin/inetimp
+            fi
+            refresh -s inetd
+            awkfield='$4'
+            ;;
+        x86_qnxA)
+            xinetd_pids="`(ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | sort -u | $grep xinetd | $grep -v grep | $awk '{print $1}' `"
+            inetd_pids="`(ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | sort -u | $grep inetd | $grep -v grep | $awk '{print $1}' `"
+            ;;
+        x86_unixware*)
+            awkfield='$6'
+            ;;
+        mips*|hppa_hpux*|ia64_hpux*|sparc_sol*|m88k*|x86*)
+            awkfield='$4'
+            ;;
+        alpha_osf*|alpha_tru64*)
+            inetd_pids=`( COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ) | sort -u |  $awk $awkfield' == "inetd" {print $1} '$awkfield' == "[inetd]" {print $1} '$awkfield' == "/usr/sbin/inetd" {print $1}' | $xargs -n${sy_xargs_space}100 echo `
+            ;;
+        *)
+            echo "SY_InstallRestartSuperDaemons( $arch ): Invalid architecture specified."
+            exit 1
+            ;;
+        esac
+
+        # Just in case we didn't go through QNX...  :-)
+
+        echo=${echo:-/bin/echo}
+        sdlog="${TMPDIR}/${prefix}superDaemonReload.log${suffix}"
+        if [ ! -f "${sdlog}" ] ; then
+                $echo "`LC_ALL=C date`: created" > $sdlog
+                chown root ${sdlog}
+                chmod 600 ${sdlog}
+        fi
+
+        $echo " "          >> $sdlog
+        uname -a          >> $sdlog
+        $echo "`LC_ALL=C date`: checking $arch inetd pids, ps_cmd='$ps_cmd', awkfield='$awkfield'" >> $sdlog
+        $echo " "          >> $sdlog
+        if [ "X$inetd_pids" = "X" ] ; then
+                $echo "ps $ps_cmd -- inetd check " >> $sdlog
+                COLUMNS=200 ps $ps_cmd        >> $sdlog
+                $echo " "          >> $sdlog
+                inetd_pids=`( COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ) | sort -u |  $awk $awkfield' == "inetd" {print $1} '$awkfield' == "[inetd]" {print $1} '$awkfield' == "/usr/sbin/inetd" {print $1} ' | $xargs -n${sy_xargs_space}100 echo `
+                $echo " "          >> $sdlog
+        fi
+        echo "inetd_pids='$inetd_pids'"          >> $sdlog
+        echo " "          >> $sdlog
+        echo "`LC_ALL=C date`: checking xinetd pids, ps_cmd='$ps_cmd', awkfield='$awkfield'" >> $sdlog
+        echo " " >> $sdlog
+        if [ "X$xinetd_pids" = "X" ] ; then
+                echo "ps $ps_cmd -- xinetd check " >> $sdlog
+                COLUMNS=200 ps $ps_cmd >> $sdlog
+                echo " " >> $sdlog
+                xinetd_pids=`( COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ; COLUMNS=200 ps $ps_cmd ) | sort -u |  $awk $awkfield' == "xinetd" {print $1} '$awkfield' == "[xinetd]" {print $1} '$awkfield' ~ /\/xinetd$/ {print $1} ' | $xargs -n${sy_xargs_space}100 echo `
+                echo " "          >> $sdlog
+        fi
+        echo "xinetd_pids='$xinetd_pids'"          >> $sdlog
+        echo " "          >> $sdlog
+
+        if [ "X$xinetd_pids" != "X" ] ; then
+                xinetd_version="`xinetd -version 2>&1 | cut -f3 -d ' '`"
+                case "X$xinetd_version" in
+                    X0*|X1*|X2.[0-2]*|X2.3.[0-3])
+                        xinetd_reload_signal=USR2
+                        ;;
+                    X*)
+                        xinetd_reload_signal=HUP
+                        ;;
+                esac
+                echo "`LC_ALL=C date`: xinetd_version='$xinetd_version' xinetd_pids = '$xinetd_pids'" >> $sdlog
+                for pid in $xinetd_pids ; do
+                        if [ "$arch" = 'x86_qnxA' ] ; then      #More QNX stuff...
+                                (ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | awk '{print " " $1 " " }' | sort -u | grep " $pid " 2>&1 >> $sdlog
+                                stat=$?
+                        else
+                                echo "kill -0 $pid" | /bin/sh 2>&1 >> $sdlog
+                                stat=$?
+                        fi
+                        if [ $stat -eq 0 ] ; then
+                                kill -$xinetd_reload_signal $pid
+                                stat=$?
+                                echo "`LC_ALL=C date`: xinetd pid kill -$xinetd_reload_signal $pid status $stat" >> $sdlog
+                                if [ $stat -eq 0 ] ; then
+                                        killed_xinetd_pids="$killed_xinetd_pids $pid"
+                                fi
+                        fi
+                done
+        fi
+
+        if [ "X$inetd_pids" != "X" ] ; then
+                echo "`LC_ALL=C date`:  inetd_pids = '$inetd_pids'" >> $sdlog
+                for pid in $inetd_pids ; do
+                        if [ "$arch" = 'x86_qnxA' ] ; then      #More QNX stuff...
+                                (ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | awk '{print " " $1 " " }' | sort -u | grep " $pid " 2>&1 >> $sdlog
+                                stat=$?
+                        else
+                                echo "kill -0 $pid" | /bin/sh 2>&1 >> $sdlog
+                                stat=$?
+                        fi
+                        echo "Check for inetd pid '$pid' status '$stat'" >> $sdlog
+                        if [ $stat -eq 0 ] ; then
+                                kill -HUP $pid
+                                stat=$?
+                                echo "`LC_ALL=C date`:  inetd pid kill -HUP $pid status $stat" >> $sdlog
+                                if [ $stat -eq 0 ] ; then
+                                        killed_inetd_pids="$killed_inetd_pids $pid"
+                                fi
+                        fi
+                done
+        fi
+        echo " "          >> $sdlog
+        echo " "          >> $sdlog
+        echo " "          >> $sdlog
+
+        #
+        #
+        # Now, just because, we go through and check to ensure the
+        # superdaemon we just tried to reload is acutally still active.
+        #
+        # I figure this will only be a problem on AIX and QNX
+        #
+        echo "`LC_ALL=C date`"          >> $sdlog
+        if [ "X$killed_xinetd_pids" != "X" ] ; then
+                for pid in $killed_xinetd_pids ; do
+                        if [ "$arch" = 'x86_qnxA' ] ; then      #More QNX stuff...
+                                (ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | awk '{print " " $1 " " }' | sort -u | grep " $pid " 2>&1 >> $sdlog
+                                stat=$?
+                        else
+                                echo "kill -0 $pid" | /bin/sh 2>&1 >> $sdlog
+                                stat=$?
+                        fi
+                        if [ $stat -ne 0 ] ; then
+                                echo "stat='$stat'"
+                                echo "SY_InstallRestartSuperDaemons(): xinetd pid $pid was reloaded and is now absent.  Please restart xinetd." | tee -a $sdlog
+                        fi
+                done
+        fi
+
+        #
+        if [ "X$killed_inetd_pids" != "X" ] ; then
+                for pid in $killed_inetd_pids ; do
+                        if [ "$arch" = 'x86_qnxA' ] ; then      #More QNX stuff...
+                                sleep 10 # just to see ...
+                                (ps -F '%p %c'; ps -F '%p %c'; ps -F '%p %c') | awk '{print " " $1 " " }' | sort -u | grep " $pid " 2>&1 >> $sdlog
+                                stat=$?
+                        else
+                                echo "kill -0 $pid" | /bin/sh 2>&1 >> $sdlog
+                                stat=$?
+                        fi
+                        echo "Check for inetd pid '$pid' status '$stat'" >> $sdlog
+                        if [ $stat -ne 0 ] ; then
+                                echo "stat='$stat'"
+                                if [ "$arch" = 'x86_qnxA' -a -f /usr/ucb/inetd ] ; then #More QNX stuff...
+                                        # use env var SYMARK_QNX_INETD_CONF only for non-default inetd.conf file full path location.
+                                        echo "SY_InstallRestartSuperDaemons(): inetd pid $pid was reloaded and is now absent.  Restarting /usr/ucb/inetd ${SYMARK_QNX_INETD_CONF}." | tee -a $sdlog
+                                        /usr/ucb/inetd ${SYMARK_QNX_INETD_CONF}
+                                else
+                                        echo "SY_InstallRestartSuperDaemons(): inetd pid $pid was reloaded and is now absent.  Please restart inetd." | tee -a $sdlog
+                                fi
+                        fi
+                done
+        fi
+
+
+        echo "Done Reloading SuperDaemon Configurations..."
+
+        if [ "X$SY_ShowCallTrace" != "X" ] ; then
+                echo "Leaving SY_InstallRestartSuperDaemons( $arch )"
+        fi
+}
+#
+#
+# Ensure /etc/inittab exists, fatal error if not...
+#
+PB_InstallCheckEtcInittabExist()
+{
+	SY_InstallCheckEtcInittabExist
+	return $?
+
+}
+#
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCheckEtcInittab()"
+fi
+#
+# Ensure /etc/inittab exists, fatal error if not...
+#
+SY_InstallCheckEtcInittabExist()
+{
+        inittab=undefined
+        if [ -h /etc/inittab ] ; then
+                inittab_tgtfile=`(cd /etc ; ls -l inittab ) | $grep -e '->' | $awk '{print $NF};'`
+                echo $inittab_tgtfile | $grep "^/" 2>&1 >/dev/null
+                status=$?
+                if [ "$status" = '0' ]; then
+                        inittab="$inittab_tgtfile"
+                else
+                        # display full service path nicely; without /./ in between
+                        dir_name=`dirname ${inittab_tgtfile}`
+                        base_name=`basename ${inittab_tgtfile}`
+                        disp_path=`(cd /etc ; cd ${dir_name}; pwd )`
+                        inittab=${disp_path}/${base_name}
+                fi
+        elif [ -f /etc/inittab ] ; then
+                inittab="/etc/inittab"
+        fi
+
+        if [ "X$inittab" = 'Xundefined' -o "X$inittab" = "X" -o "X$inittab" = "/etc/" ]; then
+            echo "SY_InstallCheckEtcInittabExist(): Cannot find a /etc/inittab file!"  1>&2
+            exit 1
+        fi
+
+	if [ "$arch" = "x86_ncrA" ] ; then
+	    initbase=undefined
+	    if [ -h /etc/conf/cf.d/init.base ] ; then
+		initbase_tgtfile=`(cd /etc/conf/cf.d ; ls -l initbase ) | $grep -e '->' | $awk '{print $NF};'`
+		echo $initbase_tgtfile | $grep "^/" 2>&1 >/dev/null
+		status=$?
+		if [ "$status" = '0' ]; then
+		    initbase="$initbase_tgtfile"
+		else
+		    # display full service path nicely; without /./ in between
+		    dir_name=`dirname ${initbase_tgtfile}`
+		    base_name=`basename ${initbase_tgtfile}`
+		    disp_path=`(cd /etc/conf/cf.d ; cd ${dir_name}; pwd )`
+		    initbase=${disp_path}/${base_name}
+		fi
+	    elif [ -f /etc/conf/cf.d/init.base ] ; then
+		initbase="/etc/conf/cf.d/init.base"
+	    fi
+	    if [ "X$initbase" = 'Xundefined' -o "X$initbase" = "X" -o "X$initbase" = "/etc/conf/cf.d/" ]; then
+		echo "SY_InstallCheckEtcInittabExist(): Cannot find ${initbase}!"  1>&2
+		exit 1
+	    fi
+	fi
+
+}
+#
+PB_InstallSetMasterPSMCPbsyncdEntry()
+{
+    idctr=0
+    idfound=0
+    while [ $idfound -eq 0 ] ; do
+	$grep "z${idctr}:.*pbsyncd" /etc/inittab >/dev/null 2>&1
+	if [ $? -eq 0 ] ; then
+	    idctr=`expr $idctr + 1`
+	else
+	    idfound=1
+	fi
+    done
+    #master_psmc_pbsyncd_entry="z${idctr}:${sy_inittab_runlevel}:once:${inst_daemondir}/${prefix}pbsyncd${suffix}.sh"
+    master_psmc_pbsyncd_entry="z${idctr}:${sy_inittab_runlevel}:once:/etc/${prefix}pbsyncd${suffix}.sh"
+
+}
+#
+if [ "X$PB_ShowDeclares" != "X" ] ; then
+	echo "Declaring PB_InstallAddEntryToEtcInittab()"
+fi
+#
+# adapted from PB_InstallAddEntryToEtcInittab()
+#
+PB_InstallAddEntryToEtcInittab()
+{
+
+	if [ "X$PB_ShowCallTrace" != "X" ] ; then
+		echo "In PB_InstallAddEntryToEtcInittab( $* )"
+	fi
+
+	new_entry="$*"
+
+	PB_InstallCleanEtcInittab "$new_entry"
+
+	#eval SY_InstallAddEntryToEtcInittab "$new_entry"
+	SY_InstallAddEntryToEtcInittab "$new_entry"
+
+	if [ "X$PB_ShowCallTrace" != "X" ] ; then
+		echo "Leaving PB_InstallAddEntryToEtcInittab()"
+	fi
+
+}
+#^L
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallAddEntryToEtcInittab( $* )"
+fi
+#
+# $* = 1 entry to add to inittab
+#
+# RESTRICTION:  Must be called at 'action' level (not 'configuration' level)
+#
+SY_InstallAddEntryToEtcInittab()
+{
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+	echo "In SY_InstallAddEntryToEtcInittab( $* )"
+fi
+
+if [ $# -lt 1 ] ; then
+    echo " "
+    echo "SY_InstallAddEntryToEtcInittab(): requires 1 argument"
+    echo " "
+    exit 2
+fi
+
+SY_InstallCleanEtcInittab "$*"
+
+#
+# Now update the inittab file...
+#
+
+echo "Adding ${SY_ProductTitle} entry to $inittab"
+
+
+inittab_entry="$*"
+if [ "$sy_inittab_aix" = "yes" ] ; then
+    mkitab "${inittab_entry}"
+else
+    echo=${echo:-/bin/echo}
+    $echo "${inittab_entry}" >> $inittab
+
+    if [ "$arch" = "x86_ncrA" ] ; then
+        $echo "Adding ${SY_ProductTitle} entry to $initbase."
+        $echo "${inittab_entry}" >> $initbase
+    fi
+fi
+
+if [ "X$SY_ShowCallTrace" != "X" ] ; then
+	echo "Leaving SY_InstallAddEntryToEtcInittab( $* )"
+fi
+
+}
+#
+#
+# Clean out 'existing' stuff in $inittab
+# adapted
+#
+PB_InstallCleanEtcInittab()
+{
+    SY_InstallCleanEtcInittab "$1"
+    return $?
+
+}
+#^L
+if [ "X$SY_ShowDeclares" != "X" ] ; then
+        echo "Declaring SY_InstallCleanEtcInittab()"
+fi
+#
+# Clean out 'existing' stuff in $inittab
+#
+#       $* is inittab entry
+#
+SY_InstallCleanEtcInittab()
+{
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+    	echo "In SY_InstallCleanEtcInittab( $* )"
+    fi
+
+    if [ $# -lt 1 ] ; then
+	echo " "
+	echo "write_SY_InstallCleanEtcInittab(): requires 1 argument"
+	echo " "
+	exit 2
+    fi
+
+    if [ "X$inittab" = "X" -o "X$inittab" = "undefined" ] ; then
+	SY_InstallCheckEtcInittabExist
+    fi
+
+    if [ "X${sy_prefsuff}" = "X" -o "X${sy_prefsuff}" = "X " ] ; then
+	tmp=" " 
+    else
+	if [ "X$arch" = "Xx86_qnxA" ] ; then	# Oh the things we do for QNX... 
+		tmp=" '`echo ${sy_prefsuff} | $sed -e s/^\ // `' "
+	else
+		tmp=" '`echo ${sy_prefsuff} | $sed -e \"s/^ //\" `' "
+	fi
+    fi
+
+    if [ "X$sy_install_inittab_backup" = "Xunknown" ] ; then
+	SY_InstallBackupFile $inittab sybak sy_install_inittab_backup
+    	sy_install_inittab_backup="$sy_backupfilename" 
+    else
+	return 0	# already backed up and cleaned out.
+    fi
+
+    if [ "$arch" = "x86_ncrA" ] ; then
+	if [ "X$sy_install_initbase_backup" = "Xunknown" ] ; then
+	    SY_InstallBackupFile $initbase sybak sy_install_initbase_backup
+	    sy_install_initbase_backup="$sy_backupfilename"
+	else
+	    return 0        # already backed up and cleaned out.
+	fi
+    fi
+
+    echo "Removing ${SY_ProductTitle}${tmp}entries (if any) from $inittab"
+
+    # Now, however, we have to build the sed command line off of the argument list...
+
+    inittab_entry="$*"
+    if [ "$sy_inittab_aix" = "yes" ] ; then
+        cp $sy_install_inittab_backup $inittab
+        rmitab "${inittab_entry}"
+    else
+        ( OLDIFS=$IFS
+        IFS=":"
+        set ${inittab_entry}
+        z_id=$1
+        IFS=$OLDIFS
+        sedprog="-e '/^${z_id}:.*pbsyncd/d'"
+	eval=${eval:-eval}
+	$eval $sed $sedprog $sy_install_inittab_backup > $inittab
+	if [ "$arch" = "x86_ncrA" ] ; then
+	$eval $sed $sedprog $sy_install_initbase_backup > $initbase
+	fi )
+    fi
+
+    if [ "X$SY_ShowCallTrace" != "X" ] ; then
+    	echo "Leaving SY_InstallCleanEtcInittab( $* )"
+    fi
+
+}
+case "$1" in
+    'start')
+	if [ "$sypbaction" = "install" ] ; then
+	    rm -f "$token"
+	    getArchitecture
+	    initializeVariables1
+	    initializeVariablespre2
+	    initializeVariables2
+	    readPBConfig2
+	    addShellsSetup
+	    addShellsSetup2
+	    SY_InstallCheckEtcServicesExist
+	    SY_InstallLocateSuperDaemonCfgFiles
+	    PB_InstallAddServicesToEtcServices
+	    SY_InstallUnconfigureSuperDaemons ${PBMASTERD} ${PBLOCALD} ${PBGUID} ${PBLOGD} ${PBSGUID} ${PBSYNCD}
+	    if [ "$inst_pkg_sd" != "no" ] ; then
+		PB_InstallConfigureSuperDaemons
+	    else
+		echo "PowerBroker daemons were not added to superdaemon configuration."
+	    fi
+	    SY_InstallRestartSuperDaemons
+	    if [ "$inst_master" = "yes" -a "$inst_psmcinstallationid" != "Do not install PSMC support" -a "X$inst_psmcinstallationid" != "X" ] ; then
+	        PB_InstallCheckEtcInittabExist
+	        PB_InstallSetMasterPSMCPbsyncdEntry
+		pbsyncdpid=`$psf_cmd | $grep "${prefix}pbsyncd${suffix} -m" | $grep -v grep | $awk '{print $2}'`
+		if [ "X$pbsyncdpid" != "X" ] ; then
+		    for pbpid in $pbsyncdpid ; do
+		        if [ $pbpid -gt 1 ] ; then
+		            kill -HUP $pbpid
+		        fi
+		    done
+		fi
+		prev_master_psmc_pbsyncd_entry=`$grep "/${prefix}pbsyncd${suffix}.sh" /etc/inittab`
+		if [ $? -eq 0 ] ; then
+		    PB_InstallCleanEtcInittab "${prev_master_psmc_pbsyncd_entry}"
+		fi
+		#$inst_daemondir/${prefix}pbsyncd${suffix}.sh
+		/etc/${prefix}pbsyncd${suffix}.sh
+		PB_InstallSetMasterPSMCPbsyncdEntry
+		PB_InstallAddEntryToEtcInittab "${master_psmc_pbsyncd_entry}"
+	    fi
+	fi
+	;;
+    'stop')
+	if [ "$sypbaction" = "remove" ] ; then
+	    rm -f "$token"
+	    getArchitecture
+	    initializeVariables1
+	    initializeVariablespre2
+	    initializeVariables2
+	    readPBConfig2
+	    addShellsSetup
+	    RemoveShellFromShellsFile
+	    SY_InstallCheckEtcServicesExist
+	    SY_InstallLocateSuperDaemonCfgFiles
+	    PB_InstallCleanEtcServices	
+	    SY_InstallUnconfigureSuperDaemons ${PBMASTERD} ${PBLOCALD} ${PBGUID} ${PBSGUID} ${PBLOGD} ${PBSYNCD}
+	    SY_InstallRestartSuperDaemons
+	    if [ "$inst_master" = "yes" -a "$inst_psmcinstallationid" != "Do not install PSMC support" -a "X$inst_psmcinstallationid" != "X" ] ; then
+		pbsyncdpid=`$psf_cmd | $grep "${prefix}pbsyncd${suffix} -m" | $grep -v grep | $awk '{print $2}'`
+		if [ "X$pbsyncdpid" != "X" ] ; then
+		    for pbpid in $pbsyncdpid ; do
+		        if [ $pbpid -gt 1 ] ; then
+			    kill -HUP $pbpid
+		        fi
+		    done
+		fi
+		PB_InstallCheckEtcInittabExist
+		prev_master_psmc_pbsyncd_entry=`$grep "/${prefix}pbsyncd${suffix}.sh" /etc/inittab`
+		if [ $? -eq 0 ] ; then
+		    PB_InstallCleanEtcInittab "${prev_master_psmc_pbsyncd_entry}"
+		fi
+	    fi
+	    ( sleep 5 ; rm -f /etc/rc3.d/K09sypbcfg_svcsinetdsmf ; rm -f /etc/.pb.cfg ) &
+	fi
+	;;
+    *)
+	echo "Usage: $i_am { start | stop }  # with $token containing { install | remove }"
+	exit 1
+	;;
+esac
+exit 0
